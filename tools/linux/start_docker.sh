@@ -5,6 +5,9 @@ CMD="docker run --rm -it"
 # bind AMCP Ports
 CMD="$CMD -p 5250:5250"
 
+# bind Media Scanner HTTP port
+CMD="$CMD -p 8000:8000"
+
 # passthrough config
 CMD="$CMD -v $PWD/casparcg.config:/opt/casparcg/casparcg.config:ro"
 

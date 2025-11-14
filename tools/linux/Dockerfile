@@ -13,7 +13,7 @@ ARG CC
 ARG CXX
 ARG GIT_HASH
 
-RUN cmake -GNinja /source -DUSE_STATIC_BOOST=ON -DUSE_SYSTEM_CEF=OFF
+RUN cmake -GNinja /source -DUSE_STATIC_BOOST=ON -DUSE_SYSTEM_CEF=OFF -DENABLE_AVX2=OFF
 
 RUN cmake --build .
 
@@ -23,8 +23,19 @@ RUN cmake --install . --prefix staging
 RUN ln -s /build/staging /staging && \
 	/source/shell/copy_deps.sh /staging/bin/casparcg /staging/lib
 
+# Download and extract media-scanner
+FROM build-casparcg AS download-scanner
+RUN apt-get update && apt-get install -y curl jq unzip
+RUN mkdir -p /media-scanner && cd /media-scanner && \
+	LATEST_RELEASE=$(curl -s https://api.github.com/repos/casparcg/media-scanner/releases/latest | jq -r '.assets[] | select(.name | contains("linux-x64")) | .browser_download_url') && \
+	curl -L "$LATEST_RELEASE" -o scanner.zip && \
+	unzip scanner.zip && \
+	rm scanner.zip && \
+	chmod +x scanner
+
 FROM docker.io/nvidia/opengl:1.2-glvnd-devel-ubuntu22.04
 COPY --from=build-casparcg /staging /opt/casparcg
+COPY --from=download-scanner /media-scanner /opt/casparcg/scanner
 
 RUN set -ex; \
 	apt-get update; \
@@ -46,6 +57,7 @@ RUN set -ex; \
 	libopengl0 \
 	libvulkan1 \
 	vulkan-tools \
+	nodejs \
 	; \
 	rm -rf /var/lib/apt/lists/*
 

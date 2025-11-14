@@ -22,28 +22,66 @@ echo "Xvfb started on DISPLAY=$DISPLAY"
 unset __EGL_VENDOR_LIBRARY_FILENAMES
 export LIBGL_ALWAYS_SOFTWARE=0
 
-# Look for NVIDIA libraries mounted by container runtime
+# Look for NVIDIA Vulkan ICD
 echo "Checking for NVIDIA Vulkan support..."
-ls -la /usr/lib/x86_64-linux-gnu/libnvidia* 2>/dev/null | head -5
-ls -la /usr/share/vulkan/icd.d/ 2>/dev/null
-ls -la /etc/vulkan/icd.d/ 2>/dev/null
 
-# The nvidia-container-runtime should mount an ICD, look for it
-if [ -f "/etc/vulkan/icd.d/nvidia_icd.json" ]; then
+# Check if nvidia libs are available
+if ls /usr/lib/x86_64-linux-gnu/libnvidia-glcore.so* > /dev/null 2>&1; then
+    echo "Found NVIDIA libraries, checking for Vulkan ICD..."
+    
+    # Look for the ICD file
+    if [ ! -f "/etc/vulkan/icd.d/nvidia_icd.json" ]; then
+        echo "Creating NVIDIA Vulkan ICD configuration..."
+        
+        # Create the directory if it doesn't exist
+        mkdir -p /etc/vulkan/icd.d
+        
+        # Create a minimal NVIDIA ICD configuration
+        cat > /etc/vulkan/icd.d/nvidia_icd.json << 'EOF'
+{
+    "file_format_version" : "1.0.0",
+    "ICD": {
+        "library_path": "libGLX_nvidia.so.0",
+        "api_version" : "1.3.0"
+    }
+}
+EOF
+        echo "Created /etc/vulkan/icd.d/nvidia_icd.json"
+    fi
+    
     export VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json
-    echo "Found NVIDIA Vulkan ICD: /etc/vulkan/icd.d/nvidia_icd.json"
-elif [ -f "/usr/share/vulkan/icd.d/nvidia_icd.json" ]; then
-    export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json
-    echo "Found NVIDIA Vulkan ICD: /usr/share/vulkan/icd.d/nvidia_icd.json"
+    echo "✓ NVIDIA Vulkan ICD configured"
 else
-    # Use software Vulkan as fallback
-    export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-    echo "NVIDIA Vulkan ICD not found, using software Vulkan (lvp)"
+    echo "✗ NVIDIA libraries not found, CEF will use software rendering"
+    echo "  Set <enable-gpu>false</enable-gpu> in casparcg.config"
 fi
 
-# Debug: show environment
+echo ""
 echo "Environment:"
 echo "  DISPLAY=$DISPLAY"
 echo "  VK_ICD_FILENAMES=$VK_ICD_FILENAMES"
+echo ""
+
+# Start media-scanner in the background
+if [ -d "/opt/casparcg/scanner" ] && [ -x "/opt/casparcg/scanner/scanner" ]; then
+    echo "Starting media-scanner on port 8000..."
+    cd /opt/casparcg/scanner
+    ./scanner --port 8000 --media-path /opt/casparcg/media > /tmp/media-scanner.log 2>&1 &
+    SCANNER_PID=$!
+    
+    # Give scanner time to start
+    sleep 2
+    
+    if kill -0 $SCANNER_PID 2>/dev/null; then
+        echo "✓ Media-scanner started (PID: $SCANNER_PID)"
+    else
+        echo "✗ Media-scanner failed to start, check /tmp/media-scanner.log"
+    fi
+    cd /opt/casparcg
+else
+    echo "✗ Media-scanner not found in /opt/casparcg/scanner"
+    echo "  CLS, TLS, and THUMBNAIL commands will not work"
+fi
+echo ""
 
 sh ./run.sh
