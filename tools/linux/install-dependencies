@@ -48,4 +48,9 @@ apt-get install -yq --no-install-recommends \
   libswscale-dev \
   libpostproc-dev \
   libswresample-dev \
-  libsimde-dev
+  libsimde-dev \
+  libatk1.0-0 \
+  libcups2 \
+  libxcomposite1 \
+  libxdamage1 \
+  libatk-bridge2.0-0

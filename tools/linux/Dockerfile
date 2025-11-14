@@ -1,42 +1,48 @@
 FROM docker.io/buildpack-deps:jammy AS build-casparcg
-	ADD tools/linux/install-dependencies /
+ADD tools/linux/install-dependencies /
 
-	RUN apt-get update && /install-dependencies
+RUN apt-get update && /install-dependencies
 
-	RUN mkdir /source && mkdir /build && mkdir /install
+RUN mkdir /source && mkdir /build && mkdir /install
 
-	COPY ./src /source
+COPY ./src /source
 
-	WORKDIR /build
+WORKDIR /build
 
-	ARG CC
-	ARG CXX
-	ARG GIT_HASH
+ARG CC
+ARG CXX
+ARG GIT_HASH
 
-	RUN cmake -GNinja /source -DUSE_STATIC_BOOST=ON -DUSE_SYSTEM_CEF=OFF
+RUN cmake -GNinja /source -DUSE_STATIC_BOOST=ON -DUSE_SYSTEM_CEF=OFF
 
-	RUN cmake --build .
+RUN cmake --build .
 
-    RUN cmake --install . --prefix staging
+RUN cmake --install . --prefix staging
 
-	# Find a better way to copy deps
-	RUN ln -s /build/staging /staging && \
-		/source/shell/copy_deps.sh /staging/bin/casparcg /staging/lib
+# Find a better way to copy deps
+RUN ln -s /build/staging /staging && \
+	/source/shell/copy_deps.sh /staging/bin/casparcg /staging/lib
 
 FROM docker.io/nvidia/opengl:1.2-glvnd-devel-ubuntu22.04
-	COPY --from=build-casparcg /staging /opt/casparcg
+COPY --from=build-casparcg /staging /opt/casparcg
 
-	RUN set -ex; \
-			apt-get update; \
-			DEBIAN_FRONTEND="noninteractive" apt-get install -y --no-install-recommends \
-            tzdata \
-			libc++1 \
-			libnss3 \
-			fontconfig \
-			; \
-			rm -rf /var/lib/apt/lists/*
+RUN set -ex; \
+	apt-get update; \
+	DEBIAN_FRONTEND="noninteractive" apt-get install -y --no-install-recommends \
+	tzdata \
+	vim \
+	libc++1 \
+	libnss3 \
+	fontconfig \
+	libatk1.0-0 \
+	libcups2 \
+	libxcomposite1 \
+	libxdamage1 \
+	libatk-bridge2.0-0 \
+	; \
+	rm -rf /var/lib/apt/lists/*
 
-	WORKDIR /opt/casparcg
+WORKDIR /opt/casparcg
 
-	ADD tools/linux/run_docker.sh ./
-	CMD ["./run_docker.sh"]
+ADD tools/linux/run_docker.sh ./
+CMD ["./run_docker.sh"]

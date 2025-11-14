@@ -38,7 +38,7 @@ elif [ -f "$HOME/.Xauthority" ]; then
   CMD="$CMD -v $HOME/.Xauthority:/root/.Xauthority:ro"
 else
   echo "Failed to find Xauthority file"
-  exit 9
+  #exit 9
 fi
 
 CMD="$CMD -e DISPLAY=$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix:ro"
