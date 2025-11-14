@@ -64,6 +64,4 @@ RUN set -ex; \
 WORKDIR /opt/casparcg
 RUN chmod 755 run.sh
 ADD tools/linux/run_docker.sh ./
-ADD tools/linux/run_docker.sh ./
-
 CMD ["./run_docker.sh"]
