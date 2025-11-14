@@ -65,8 +65,8 @@ echo ""
 # Start media-scanner in the background
 if [ -d "/opt/casparcg/scanner" ] && [ -x "/opt/casparcg/scanner/scanner" ]; then
     echo "Starting media-scanner on port 8000..."
-    cd /opt/casparcg/scanner
-    ./scanner --port 8000 --media-path /opt/casparcg/media > /tmp/media-scanner.log 2>&1 &
+    cd /opt/casparcg
+    ./scanner/scanner --port 8000 --media-path /opt/casparcg/media > /tmp/media-scanner.log 2>&1 &
     SCANNER_PID=$!
     
     # Give scanner time to start

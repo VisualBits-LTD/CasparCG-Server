@@ -58,6 +58,7 @@ RUN set -ex; \
 	libvulkan1 \
 	vulkan-tools \
 	nodejs \
+	ffmpeg \
 	; \
 	rm -rf /var/lib/apt/lists/*
 
