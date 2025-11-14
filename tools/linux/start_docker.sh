@@ -15,7 +15,10 @@ CMD="$CMD -v $PWD/media:/opt/casparcg/media"
 
 HAS_NVIDIA_RUNTIME=$(docker info | grep -i nvidia)
 if [ ! -z "$HAS_NVIDIA_RUNTIME" ]; then
-  CMD="$CMD --runtime=nvidia"
+  # Request all GPU capabilities including Vulkan graphics
+  CMD="$CMD --gpus all"
+  CMD="$CMD -e NVIDIA_VISIBLE_DEVICES=all"
+  CMD="$CMD -e NVIDIA_DRIVER_CAPABILITIES=all"
 else
   # assume intel, so setup for that
   CMD="$CMD --device /dev/dri"
