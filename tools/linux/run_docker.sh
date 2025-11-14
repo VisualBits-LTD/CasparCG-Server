@@ -2,7 +2,7 @@
 
 # Start Xvfb for headless OpenGL (CasparCG's EGL code requires a display)
 echo "Starting Xvfb..."
-xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset > /tmp/xvfb.log 2>&1 &
+Xvfb :99 -screen 0 1920x1080x30 -ac +extension GLX +render -noreset > /tmp/xvfb.log 2>&1 &
 XVFB_PID=$!
 export DISPLAY=:99
 
