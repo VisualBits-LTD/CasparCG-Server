@@ -57,7 +57,6 @@ RUN set -ex; \
 	libopengl0 \
 	libvulkan1 \
 	vulkan-tools \
-	nodejs \
 	ffmpeg \
 	; \
 	rm -rf /var/lib/apt/lists/*
