@@ -73,6 +73,7 @@ extern "C" {
 #include <tbb/parallel_for.h>
 #include <tbb/parallel_invoke.h>
 
+#include <future>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -389,6 +390,7 @@ struct ffmpeg_consumer : public core::frame_consumer
 
     std::exception_ptr exception_;
     std::mutex         exception_mutex_;
+    std::atomic<bool>  failed_{false};
 
     tbb::concurrent_bounded_queue<std::tuple<core::const_frame, std::int64_t, std::int64_t>> frame_buffer_;
     std::thread                                                                              frame_thread_;
@@ -528,12 +530,21 @@ struct ffmpeg_consumer : public core::frame_consumer
 
                 tbb::concurrent_bounded_queue<std::shared_ptr<AVPacket>> packet_buffer;
                 packet_buffer.set_capacity(realtime_ ? 1 : 128);
-                auto packet_thread = std::thread([&] {
+                std::promise<void> packet_thread_promise;
+                auto packet_thread_future = packet_thread_promise.get_future();
+                
+                auto packet_thread = std::thread([&, promise = std::move(packet_thread_promise)]() mutable {
                     try {
                         CASPAR_SCOPE_EXIT
                         {
                             if (!(oc->oformat->flags & AVFMT_NOFILE)) {
-                                FF(avio_closep(&oc->pb));
+                                try {
+                                    FF(avio_closep(&oc->pb));
+                                } catch (...) {
+                                    CASPAR_LOG_CURRENT_EXCEPTION();
+                                    failed_.store(true, std::memory_order_release);
+                                    throw;
+                                }
                             }
                         };
 
@@ -555,11 +566,18 @@ struct ffmpeg_consumer : public core::frame_consumer
                         if ((!video_st || count[video_st->index]) && (!audio_st || count[audio_st->index])) {
                             FF(av_write_trailer(oc));
                         }
+                        
+                        promise.set_value();
 
                     } catch (...) {
                         CASPAR_LOG_CURRENT_EXCEPTION();
-                        // TODO
+                        failed_.store(true, std::memory_order_release);
                         packet_buffer.abort();
+                        try {
+                            promise.set_exception(std::current_exception());
+                        } catch (...) {
+                            // Promise already set or moved
+                        }
                     }
                 });
                 CASPAR_SCOPE_EXIT
@@ -569,6 +587,17 @@ struct ffmpeg_consumer : public core::frame_consumer
                         packet_buffer.push(nullptr);
                         packet_buffer.abort();
                         packet_thread.join();
+                        
+                        // Check if packet thread had any errors
+                        try {
+                            packet_thread_future.get();
+                        } catch (...) {
+                            failed_.store(true, std::memory_order_release);
+                            std::lock_guard<std::mutex> lock(exception_mutex_);
+                            if (exception_ == nullptr) {
+                                exception_ = std::current_exception();
+                            }
+                        }
                     }
                 };
 
@@ -608,6 +637,8 @@ struct ffmpeg_consumer : public core::frame_consumer
 
                 packet_thread.join();
             } catch (...) {
+                CASPAR_LOG_CURRENT_EXCEPTION();
+                failed_.store(true, std::memory_order_release);
                 std::lock_guard<std::mutex> lock(exception_mutex_);
                 exception_ = std::current_exception();
             }
@@ -618,6 +649,12 @@ struct ffmpeg_consumer : public core::frame_consumer
     {
         // TODO - field alignment
 
+        // Check failed flag first (synchronous, fast)
+        if (failed_.load(std::memory_order_acquire)) {
+            CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("FFmpeg consumer has failed"));
+        }
+
+        // Also check exception_ for backwards compatibility
         {
             std::lock_guard<std::mutex> lock(exception_mutex_);
             if (exception_ != nullptr) {
@@ -650,6 +687,205 @@ struct ffmpeg_consumer : public core::frame_consumer
         std::lock_guard<std::mutex> lock(state_mutex_);
         return state_;
     }
+
+    // Check if the background thread is still running
+    bool is_thread_alive() const
+    {
+        return frame_thread_.joinable();
+    }
+};
+
+// A lightweight proxy that can respawn the inner ffmpeg_consumer on failure.
+struct ffmpeg_consumer_proxy : public core::frame_consumer
+{
+    // Immutable constructor parameters for recreation
+    const std::string        path_;
+    const std::string        args_;
+    const bool               realtime_;
+    const common::bit_depth  depth_;
+
+    // Last known initialization context for respawn
+    core::video_format_desc  format_desc_{};
+    std::optional<core::channel_info> channel_info_;
+    int                      port_index_ = -1;
+
+    // Inner consumer instance
+    std::unique_ptr<ffmpeg_consumer> inner_;
+
+    // Backoff state
+    std::chrono::steady_clock::time_point last_failure_time_{};
+    std::chrono::steady_clock::time_point last_send_time_{};
+    int                                   consecutive_failures_ = 0;
+    std::chrono::milliseconds             current_backoff_{0};
+    
+  public:
+    ffmpeg_consumer_proxy(std::string path, std::string args, bool realtime, common::bit_depth depth)
+        : path_(std::move(path))
+        , args_(std::move(args))
+        , realtime_(realtime)
+        , depth_(depth)
+    {
+    }
+
+    // frame_consumer
+    void initialize(const core::video_format_desc& format_desc,
+                    const core::channel_info&      channel_info,
+                    int                            port_index) override
+    {
+        format_desc_   = format_desc;
+        channel_info_  = channel_info;
+        port_index_    = port_index;
+
+        inner_.reset();
+        consecutive_failures_ = 0;
+        current_backoff_      = std::chrono::milliseconds(0);
+        
+        // Create and initialize a fresh inner consumer; swallow exceptions to allow later retry
+        try {
+            inner_ = std::make_unique<ffmpeg_consumer>(path_, args_, realtime_, depth_);
+            inner_->initialize(format_desc_, *channel_info_, port_index_);
+        } catch (...) {
+            // Don't log exception details - respawn will handle it
+            CASPAR_LOG(info) << print() << L" Initial connection failed, will retry";
+            inner_.reset();
+            last_failure_time_ = std::chrono::steady_clock::now();
+            consecutive_failures_++;
+            current_backoff_ = std::chrono::milliseconds(1000);
+        }
+    }
+
+    std::future<bool> send(core::video_field field, core::const_frame frame) override
+    {
+        last_send_time_ = std::chrono::steady_clock::now();
+        
+        // If inner is missing (failed init), check backoff before attempting respawn
+        if (!inner_) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_failure_time_);
+            
+            if (elapsed < current_backoff_) {
+                // Still in backoff period; drop frame silently
+                return caspar::make_ready_future(true);
+            }
+
+            // Backoff period elapsed; attempt respawn
+            try {
+                inner_ = std::make_unique<ffmpeg_consumer>(path_, args_, realtime_, depth_);
+                inner_->initialize(format_desc_, *channel_info_, port_index_);
+                
+                // Success! Reset backoff state
+                const auto prev_failures = consecutive_failures_;
+                consecutive_failures_ = 0;
+                current_backoff_      = std::chrono::milliseconds(0);
+                if (prev_failures > 0) {
+                    CASPAR_LOG(info) << print() << L" Reconnected after " << prev_failures << L" failure(s)";
+                }
+            } catch (...) {
+                inner_.reset();
+                last_failure_time_ = now;
+                consecutive_failures_++;
+                
+                // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s (capped at 32s)
+                current_backoff_ = std::chrono::milliseconds(
+                    std::min(1000 * (1 << std::min(consecutive_failures_ - 1, 5)), 32000));
+                
+                CASPAR_LOG(warning) << print() << L" Connection failed (attempt " << consecutive_failures_ 
+                                   << L"), retrying in " << current_backoff_.count() / 1000.0 << L"s";
+                
+                // Prevent removal by output: report success to keep proxy alive
+                return caspar::make_ready_future(true);
+            }
+        }
+
+        // Forward to inner and catch failures to trigger respawn on next call
+        try {
+            auto result = inner_->send(field, frame);
+            auto proxy_ptr = this;
+            
+            // Wrap the future to catch exceptions when it's awaited
+            return std::async(std::launch::deferred, [proxy_ptr, result = std::move(result)]() mutable {
+                try {
+                    bool success = result.get();
+                    if (!success) {
+                        throw std::runtime_error("Inner consumer returned false");
+                    }
+                    return true;
+                } catch (...) {
+                    proxy_ptr->inner_.reset();
+                    proxy_ptr->last_failure_time_ = std::chrono::steady_clock::now();
+                    proxy_ptr->consecutive_failures_++;
+                    
+                    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s (capped at 32s)
+                    proxy_ptr->current_backoff_ = std::chrono::milliseconds(
+                        std::min(1000 * (1 << std::min(proxy_ptr->consecutive_failures_ - 1, 5)), 32000));
+                    
+                    // Return true to prevent output.cpp from removing the proxy
+                    return true;
+                }
+            });
+        } catch (...) {
+            // If inner_->send() itself throws (e.g., exception check at start), handle it here
+            inner_.reset();
+            last_failure_time_ = std::chrono::steady_clock::now();
+            consecutive_failures_++;
+            
+            current_backoff_ = std::chrono::milliseconds(
+                std::min(1000 * (1 << std::min(consecutive_failures_ - 1, 5)), 32000));
+            
+            if (consecutive_failures_ == 1) {
+                CASPAR_LOG(error) << print() << L" Connection lost, reconnecting...";
+            }
+            
+            return caspar::make_ready_future(true);
+        }
+    }
+
+    std::future<bool> call(const std::vector<std::wstring>& params) override
+    {
+        // ffmpeg consumer does not implement call; safely no-op
+        return caspar::make_ready_future(false);
+    }
+
+    std::wstring print() const override
+    {
+        if (inner_) return inner_->print();
+        return L"ffmpeg[" + u16(path_) + L"]";
+    }
+
+    std::wstring name() const override { return L"ffmpeg"; }
+
+    bool has_synchronization_clock() const override { return false; }
+
+    int index() const override
+    {
+        // Mirror inner if present; otherwise derive from path checksum like inner does
+        if (inner_) return inner_->index();
+        boost::crc_16_type result;
+        result.process_bytes(path_.data(), path_.length());
+        return 100000 + result.checksum();
+    }
+
+    core::monitor::state state() const override
+    {
+        // Check if inner has failed even when not sending frames
+        if (inner_) {
+            try {
+                // Try to detect if the inner consumer has a stored exception
+                // by calling its state() which should be safe
+                return inner_->state();
+            } catch (...) {
+                // If state() throws, the inner consumer has failed
+                CASPAR_LOG(warning) << print() << L" Detected failure via state() check";
+                // Can't modify mutable state from const method, but we can log
+            }
+        }
+        
+        core::monitor::state state;
+        state["file/path"] = u8(path_);
+        state["proxy/consecutive_failures"] = consecutive_failures_;
+        state["proxy/backoff_ms"] = static_cast<int>(current_backoff_.count());
+        return state;
+    }
 };
 
 spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wstring>&     params,
@@ -662,11 +898,22 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
 
     auto                     path = u8(params.at(1));
     std::vector<std::string> args;
+    bool                     respawn = false;
     for (auto n = 2; n < params.size(); ++n) {
+        // Treat a bare RESPawn flag specially; otherwise collect as args
+        if (boost::iequals(params[n], L"RESPAWN")) {
+            respawn = true;
+            continue;
+        }
         args.emplace_back(u8(params[n]));
     }
-    return spl::make_shared<ffmpeg_consumer>(
-        path, boost::join(args, " "), boost::iequals(params.at(0), L"STREAM"), channel_info.depth);
+
+    const auto realtime = boost::iequals(params.at(0), L"STREAM");
+
+    if (respawn)
+        return spl::make_shared<ffmpeg_consumer_proxy>(path, boost::join(args, " "), realtime, channel_info.depth);
+
+    return spl::make_shared<ffmpeg_consumer>(path, boost::join(args, " "), realtime, channel_info.depth);
 }
 
 spl::shared_ptr<core::frame_consumer>
@@ -675,9 +922,14 @@ create_preconfigured_consumer(const boost::property_tree::wptree&               
                               const std::vector<spl::shared_ptr<core::video_channel>>& channels,
                               const core::channel_info&                                channel_info)
 {
-    return spl::make_shared<ffmpeg_consumer>(u8(ptree.get<std::wstring>(L"path", L"")),
-                                             u8(ptree.get<std::wstring>(L"args", L"")),
-                                             ptree.get(L"realtime", false),
-                                             channel_info.depth);
+    const auto path     = u8(ptree.get<std::wstring>(L"path", L""));
+    const auto args     = u8(ptree.get<std::wstring>(L"args", L""));
+    const auto realtime = ptree.get(L"realtime", false);
+    const auto respawn  = ptree.get(L"respawn", false);
+
+    if (respawn)
+        return spl::make_shared<ffmpeg_consumer_proxy>(path, args, realtime, channel_info.depth);
+
+    return spl::make_shared<ffmpeg_consumer>(path, args, realtime, channel_info.depth);
 }
 }} // namespace caspar::ffmpeg
