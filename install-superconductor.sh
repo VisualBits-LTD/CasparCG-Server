@@ -39,7 +39,7 @@ chmod +x superconductor
 
 # Extract icon from AppImage (if possible)
 echo "Extracting icon..."
-./superconductor --appimage-extract-and-run --appimage-extract >/dev/null 2>&1 || true
+./superconductor --appimage-extract >/dev/null 2>&1 || true
 if [ -d "squashfs-root" ]; then
     # Look for icon files
     find squashfs-root -name "*.png" -o -name "*.svg" | head -1 | while read icon; do
@@ -55,7 +55,7 @@ if [ ! -f "$ICON_DIR/superconductor.png" ]; then
     echo "No icon extracted, desktop entry will use default icon"
     ICON_PATH="applications-multimedia"
 else
-    ICON_PATH="$ICON_DIR/superconductor.png"
+    ICON_PATH="superconductor"
 fi
 
 # Create desktop entry
@@ -75,6 +75,12 @@ StartupWMClass=SuperConductor
 EOF
 
 chmod +x "$DESKTOP_DIR/superconductor.desktop"
+
+# Create desktop icon symlink
+if [ -d "$HOME/Desktop" ]; then
+    echo "Creating desktop icon..."
+    ln -sf "$DESKTOP_DIR/superconductor.desktop" "$HOME/Desktop/superconductor.desktop"
+fi
 
 # Update desktop database
 if command -v update-desktop-database &> /dev/null; then

@@ -3,7 +3,9 @@
 CMD="docker run --rm -it --name casparcg-server"
 
 # bind AMCP Ports
-CMD="$CMD -p 5250:5250"
+# CMD="$CMD -p 5250:5250"
+# Host networking for low latency
+CMD="$CMD --network host"
 
 # passthrough config
 CMD="$CMD -v $PWD/casparcg.config:/opt/casparcg/casparcg.config:ro"
