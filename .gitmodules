@@ -1,0 +1,3 @@
+[submodule "media-scanner"]
+	path = media-scanner
+	url = https://github.com/CasparCG/media-scanner.git

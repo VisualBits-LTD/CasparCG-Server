@@ -1,6 +1,6 @@
 #!/bin/bash
 
-CMD="docker run --rm -it"
+CMD="docker run --rm -it --name casparcg-server"
 
 # bind AMCP Ports
 CMD="$CMD -p 5250:5250"
@@ -13,11 +13,18 @@ CMD="$CMD -v $PWD/media:/opt/casparcg/media"
 
 ## DO NOT EDIT BELOW THIS LINE
 
-HAS_NVIDIA_RUNTIME=$(docker info | grep -i nvidia)
-if [ ! -z "$HAS_NVIDIA_RUNTIME" ]; then
+# Detect and configure GPU support
+if docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi &>/dev/null 2>&1; then
+  echo "Using NVIDIA GPU"
+  CMD="$CMD --gpus all"
+elif [ ! -z "$(docker info 2>/dev/null | grep -i nvidia)" ]; then
+  echo "Using NVIDIA GPU (legacy runtime)"
   CMD="$CMD --runtime=nvidia"
-else
-  # assume intel, so setup for that
+fi
+
+# Add Intel GPU for hybrid setups or fallback
+if [ -d "/dev/dri" ]; then
+  echo "Adding Intel GPU support"
   CMD="$CMD --device /dev/dri"
 fi
 
